@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "workbuddy-switch",
-  "version": "0.1.63",
+  "version": "0.1.64",
   "identifier": "com.wbswitch.app",
   "build": {
     "beforeDevCommand": "npm run dev:desktop",
@@ -44,11 +44,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/agent-studio-runtime"]
+    "externalBin": [
+      "binaries/agent-studio-runtime"
+    ]
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEYwNEU4RkQ5OEZCN0FGRApSV1Q5ZXZ1WS9lZ0VEd1VuVFpOYjU1OGJGd1NmMVhaWHJTSEdnNVRSSEcweUxWR05TN0h2WnloSwo=",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDcwMjA2NDRFRDY2MEZCMjMKUldRaisyRFdUbVFnY05Sd0RVR1MwYzZNRzE3Q0NPNjYvbldrWWgzWkxCaWtjR25nYTc5UUl0Y0MK",
       "endpoints": [
         "https://github.com/recallmc/workbuddy-switch/releases/latest/download/latest.json",
         "https://github.com/recallmc/workbuddy-switch/releases/latest/download/latest-{{target}}-{{arch}}.json",
