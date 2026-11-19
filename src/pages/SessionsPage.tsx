@@ -18,6 +18,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { displayName } from "@/lib/account-display";
 import * as api from "@/lib/api";
+import { precheckQuickSync, summarizeQuickSync } from "@/lib/quick-sync";
+import type { QuickSyncState } from "@/lib/quick-sync";
 import type { AccountMeta, Session, SessionGroupClient, SessionGroupCurrentAccount, SessionGroupDetail, SessionGroupMemberDetail, SessionGroupSummary, SessionGroupUnifyPlan, SessionSyncMode, WbVariant } from "@/lib/types";
 import { accountVariant, variantLabel } from "@/lib/variant";
 import { useAccountsStore } from "@/stores/accounts";
@@ -53,6 +55,10 @@ export default function SessionsPage() {
   const [unifyLoading, setUnifyLoading] = useState<string | null>(null);
   const [currentAccounts, setCurrentAccounts] = useState<SessionGroupCurrentAccount[]>([]);
   const [actionBusy, setActionBusy] = useState(false);
+  /** 一键同步：进行中 / 成功 / 失败都直接渲染在详情面板顶部。 */
+  const [quickSync, setQuickSync] = useState<QuickSyncState>({ status: "idle" });
+  const quickSyncKeyRef = useRef<string | null>(null);
+  const quickSyncRequestId = useRef(0);
   const [detailOpen, setDetailOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   /** 列表卡片「… → 删除关联」的待确认目标；非空时展示确认框。 */
@@ -81,6 +87,9 @@ export default function SessionsPage() {
     setDetailLoading(true);
     setSelectedGroupId(id);
     setAddOpen(false);
+    // 切换会话组后旧请求的结果不再属于当前详情：作废它的状态回写。
+    quickSyncRequestId.current += 1;
+    setQuickSync({ status: "idle" });
     setDetailOpen(true);
   }
   /**
@@ -234,6 +243,8 @@ export default function SessionsPage() {
     previewRequestId.current += 1;
     setUnifyPlan(null);
     setUnifyLoading(null);
+    quickSyncRequestId.current += 1;
+    setQuickSync({ status: "idle" });
   }
 
   async function prepareUnify(source: SessionGroupMemberDetail) {
@@ -344,6 +355,56 @@ export default function SessionsPage() {
     } catch (error) {
       toast.error("批量同步失败", { description: api.asError(error) });
     } finally {
+      setActionBusy(false);
+    }
+  }
+
+  /**
+   * 一键同步当前关联会话。
+   *
+   * 入口在详情面板顶部；点击前先用本地判定拦掉「详情未加载 / 无有效成员 /
+   * 无安全来源 / 已是最新」，避免空转也显示成失败。真正的写入仍走后端
+   * `sync_session_group_safe_batch`（由它复核来源与目标），成功后立即重拉
+   * 列表与详情，界面状态即时更新。
+   */
+  async function quickSyncGroup() {
+    const current = detail;
+    // 同步中（含连点）直接忽略：ref 在首个 await 之前置位，不依赖 React 状态刷新时机。
+    if (!current || actionBusy || quickSyncKeyRef.current) return;
+    const check = precheckQuickSync(current);
+    if (check.kind !== "ready") {
+      setQuickSync({ status: check.kind === "latest" ? "success" : "error", message: check.message });
+      return;
+    }
+    // 插件侧：只有写入目标含当前登录账号时才需要「关闭并重开」确认，沿用现有确认框。
+    if (await needsEditorRestart(check.targetAccountIds)) {
+      setRestartPrompt({ actionLabel: "关闭并同步", run: () => runQuickSync(true) });
+      return;
+    }
+    await runQuickSync(false);
+  }
+
+  async function runQuickSync(restart: boolean) {
+    const current = detail;
+    if (!current || actionBusy || quickSyncKeyRef.current) return;
+    const key = `${client}:${scope ?? "all"}:${current.groupId}`;
+    quickSyncKeyRef.current = key;
+    const requestId = ++quickSyncRequestId.current;
+    setQuickSync({ status: "running", message: restart ? "正在关闭客户端并同步…" : "正在同步关联会话…" });
+    setActionBusy(true);
+    try {
+      const report = await api.syncSessionGroupSafeBatch(client, current.groupId, scope, restart);
+      notifyResult(report);
+      if (quickSyncRequestId.current === requestId) setQuickSync(summarizeQuickSync(report));
+      // 列表状态与详情成员版本都要立刻反映同步结果；内部已做「已切换会话组」防护。
+      await reloadSelectedGroup();
+    } catch (error) {
+      const message = api.asError(error);
+      if (quickSyncRequestId.current === requestId) setQuickSync({ status: "error", message });
+      toast.error("一键同步失败", { description: message });
+    } finally {
+      // 同一时刻只允许一个一键同步在飞，结束时无条件释放（状态回写才按 requestId 过滤）。
+      quickSyncKeyRef.current = null;
       setActionBusy(false);
     }
   }
@@ -496,6 +557,7 @@ export default function SessionsPage() {
       error={detailError} loading={detailLoading} onClose={closeDetail}
       onRetry={() => { setDetailError(null); void reloadSelectedGroup(); }}
       onPrepareUnify={prepareUnify} onConfirmUnify={confirmUnify} onBatchSync={syncSafeBatch} onAdd={addMember}
+      quickSync={quickSync} onQuickSync={() => void quickSyncGroup()}
       onUnlinkMember={unlinkMember}
       addOpen={addOpen} setAddOpen={setAddOpen} fullPage={false}
     />
