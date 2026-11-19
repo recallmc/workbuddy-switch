@@ -60,8 +60,13 @@ fn main() {
         })(),
         Some("serve") => serve(),
         Some("custom-hook") => custom_hook(),
+        // 诊断用：按当前环境打印解析出的主目录（排查「未找到应用配置目录」）。
+        Some("home") => {
+            println!("{}", home().display());
+            Ok(())
+        }
         _ => {
-            eprintln!("agent-studio-runtime serve | hook | custom-hook");
+            eprintln!("agent-studio-runtime serve | hook | custom-hook | home");
             Ok(())
         }
     };
