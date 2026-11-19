@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Check, ChevronLeft, ChevronRight, CheckCircle2, Ellipsis, Folder, Link2, Loader2, MessageCircle, Layers3, RefreshCw, SlidersHorizontal, Trash2, TriangleAlert } from "lucide-react";
+import { CheckCircle2, ChevronLeft, ChevronRight, Ellipsis, Folder, Link2, Loader2, MessageCircle, Layers3, RefreshCcw, RefreshCw, SlidersHorizontal, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { CodeBuddyCnIdeMark, VscodeExtMark, WorkBuddyAiMark, WorkBuddyMark } from "@/components/product-marks";
@@ -18,8 +18,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { displayName } from "@/lib/account-display";
 import * as api from "@/lib/api";
-import { precheckQuickSync, summarizeQuickSync } from "@/lib/quick-sync";
-import type { QuickSyncState } from "@/lib/quick-sync";
+import { summarizeQuickSync } from "@/lib/quick-sync";
 import type { AccountMeta, Session, SessionGroupClient, SessionGroupCurrentAccount, SessionGroupDetail, SessionGroupMemberDetail, SessionGroupSummary, SessionGroupUnifyPlan, SessionSyncMode, WbVariant } from "@/lib/types";
 import { accountVariant, variantLabel } from "@/lib/variant";
 import { useAccountsStore } from "@/stores/accounts";
@@ -55,16 +54,10 @@ export default function SessionsPage() {
   const [unifyLoading, setUnifyLoading] = useState<string | null>(null);
   const [currentAccounts, setCurrentAccounts] = useState<SessionGroupCurrentAccount[]>([]);
   const [actionBusy, setActionBusy] = useState(false);
-  /** 一键同步：进行中 / 成功 / 失败都直接渲染在详情面板顶部。 */
-  const [quickSync, setQuickSync] = useState<QuickSyncState>({ status: "idle" });
+  /** 标题栏一键同步：一次同步当前所有待同步会话；进行中禁止重复触发。 */
+  const [bulkSync, setBulkSync] = useState<{ status: "idle" | "running" | "success" | "error"; message?: string }>({ status: "idle" });
+  /** 同步互斥：ref 在首个 await 之前置位，连点不会发起第二轮。 */
   const quickSyncKeyRef = useRef<string | null>(null);
-  const quickSyncRequestId = useRef(0);
-  /** 列表卡片的一键同步状态：按 groupId 保存，卡片按钮就地显示进行中 / 失败。 */
-  const [cardSync, setCardSync] = useState<Record<string, QuickSyncState>>({});
-  /** 列表入口的全局互斥：一次只同步一个会话组，避免并发写入。 */
-  const cardSyncKeyRef = useRef<string | null>(null);
-  /** 插件侧必须先判断 VS Code 是否运行：先打开详情，等详情就绪后复用原有确认流程。 */
-  const pendingCardSyncRef = useRef<string | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   /** 列表卡片「… → 删除关联」的待确认目标；非空时展示确认框。 */
@@ -93,9 +86,6 @@ export default function SessionsPage() {
     setDetailLoading(true);
     setSelectedGroupId(id);
     setAddOpen(false);
-    // 切换会话组后旧请求的结果不再属于当前详情：作废它的状态回写。
-    quickSyncRequestId.current += 1;
-    setQuickSync({ status: "idle" });
     setDetailOpen(true);
   }
   /**
@@ -227,17 +217,8 @@ export default function SessionsPage() {
     return () => { live = false; };
   }, [client, scope, selectedGroupId, detailContextKey, detailOpen]);
 
-  // 列表卡片上的「一键同步」在插件侧需要先拿到详情才能判断是否要关闭 VS Code：
-  // 详情就绪后自动执行一次，后续沿用与详情按钮完全相同的流程。
-  useEffect(() => {
-    const pending = pendingCardSyncRef.current;
-    if (!pending || !detail || detail.groupId !== pending) return;
-    pendingCardSyncRef.current = null;
-    void quickSyncGroup();
-    // 只在详情就绪时触发一次；quickSyncGroup 内部已有互斥与上下文校验。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [detail]);
-
+  /** 待同步且存在安全来源的会话组：标题栏一键同步的作用范围。 */
+  const pendingGroups = useMemo(() => groups.filter((group) => group.summaryStatus === "behind" && group.hasSafeSource), [groups]);
   const filteredGroups = useMemo(() => {
     const result = groups.filter((group) => {
       return statusFilter === "all" || group.summaryStatus === statusFilter;
@@ -260,10 +241,7 @@ export default function SessionsPage() {
     previewRequestId.current += 1;
     setUnifyPlan(null);
     setUnifyLoading(null);
-    quickSyncRequestId.current += 1;
-    setQuickSync({ status: "idle" });
-    setCardSync({});
-    pendingCardSyncRef.current = null;
+    setBulkSync({ status: "idle" });
   }
 
   async function prepareUnify(source: SessionGroupMemberDetail) {
@@ -379,95 +357,62 @@ export default function SessionsPage() {
   }
 
   /**
-   * 一键同步当前关联会话。
+   * 标题栏「一键同步」：把当前客户端 / 档位下所有待同步的关联会话补齐。
    *
-   * 入口在详情面板顶部；点击前先用本地判定拦掉「详情未加载 / 无有效成员 /
-   * 无安全来源 / 已是最新」，避免空转也显示成失败。真正的写入仍走后端
-   * `sync_session_group_safe_batch`（由它复核来源与目标），成功后立即重拉
-   * 列表与详情，界面状态即时更新。
+   * 复用既有的 `sync_session_group_safe_batch`（来源复核、内容校验、关闭/重开
+   * 客户端都由它负责），这里只做串行编排与结果汇总，不新增任何同步逻辑。
    */
-  async function quickSyncGroup() {
-    const current = detail;
-    // 同步中（含连点）直接忽略：ref 在首个 await 之前置位，不依赖 React 状态刷新时机。
-    if (!current || actionBusy || quickSyncKeyRef.current) return;
-    const check = precheckQuickSync(current);
-    if (check.kind !== "ready") {
-      setQuickSync({ status: check.kind === "latest" ? "success" : "error", message: check.message });
-      return;
-    }
-    // 插件侧：只有写入目标含当前登录账号时才需要「关闭并重开」确认，沿用现有确认框。
-    if (await needsEditorRestart(check.targetAccountIds)) {
-      setRestartPrompt({ actionLabel: "关闭并同步", run: () => runQuickSync(true) });
-      return;
-    }
-    await runQuickSync(false);
-  }
-
-  async function runQuickSync(restart: boolean) {
-    const current = detail;
-    if (!current || actionBusy || quickSyncKeyRef.current) return;
-    const key = `${client}:${scope ?? "all"}:${current.groupId}`;
-    quickSyncKeyRef.current = key;
-    const requestId = ++quickSyncRequestId.current;
-    setQuickSync({ status: "running", message: restart ? "正在关闭客户端并同步…" : "正在同步关联会话…" });
-    setActionBusy(true);
-    try {
-      const report = await api.syncSessionGroupSafeBatch(client, current.groupId, scope, restart);
-      notifyResult(report);
-      if (quickSyncRequestId.current === requestId) setQuickSync(summarizeQuickSync(report));
-      // 列表状态与详情成员版本都要立刻反映同步结果；内部已做「已切换会话组」防护。
-      await reloadSelectedGroup();
-    } catch (error) {
-      const message = api.asError(error);
-      if (quickSyncRequestId.current === requestId) setQuickSync({ status: "error", message });
-      toast.error("一键同步失败", { description: message });
-    } finally {
-      // 同一时刻只允许一个一键同步在飞，结束时无条件释放（状态回写才按 requestId 过滤）。
-      quickSyncKeyRef.current = null;
-      setActionBusy(false);
-    }
-  }
-
-  /** 列表卡片入口：WorkBuddy / CodeBuddy IDE 就地同步；插件侧先开详情，走「关闭并重开」确认。 */
-  function quickSyncCard(group: SessionGroupSummary) {
-    if (actionBusy || cardSyncKeyRef.current) return;
+  async function quickSyncAll() {
+    if (actionBusy || quickSyncKeyRef.current || pendingGroups.length === 0) return;
+    // 插件侧：写入目标含当前登录账号时才需要「关闭并重开」确认，沿用现有确认框。
     if (client === "vscodeExt") {
-      pendingCardSyncRef.current = group.groupId;
-      openDetail(group.groupId);
-      return;
+      const details = await Promise.allSettled(pendingGroups.map((group) => api.getSessionGroup(client, group.groupId, scope)));
+      const targetAccountIds = details.flatMap((result) => result.status === "fulfilled"
+        ? result.value.members
+          .filter((member) => member.linkState === "active" && member.versionStatus === "behind")
+          .map((member) => member.accountId)
+          .filter((id): id is string => Boolean(id))
+        : []);
+      if (await needsEditorRestart(targetAccountIds)) {
+        setRestartPrompt({ actionLabel: "关闭并同步", run: () => runQuickSyncAll(true) });
+        return;
+      }
     }
-    void runCardSync(group);
+    await runQuickSyncAll(false);
   }
 
-  async function runCardSync(group: SessionGroupSummary) {
-    if (actionBusy || cardSyncKeyRef.current) return;
-    cardSyncKeyRef.current = group.groupId;
-    setCardSync((map) => ({ ...map, [group.groupId]: { status: "running", message: "正在同步关联会话…" } }));
+  async function runQuickSyncAll(restart: boolean) {
+    const targets = pendingGroups;
+    if (actionBusy || quickSyncKeyRef.current || targets.length === 0) return;
+    quickSyncKeyRef.current = "all";
+    setBulkSync({ status: "running" });
     setActionBusy(true);
+    const combined = { synced: [] as unknown[], skipped: [] as unknown[], errors: [] as { error: string }[], needsRecovery: false };
     try {
-      const report = await api.syncSessionGroupSafeBatch(client, group.groupId, scope);
-      notifyResult(report);
-      const outcome = summarizeQuickSync(report);
-      setCardSync((map) => ({ ...map, [group.groupId]: outcome }));
-      // 列表状态与（若正打开该组）详情立即刷新；成功后卡片由「内容一致」接管。
-      await reloadGroups();
-      if (contextRef.current.selectedGroupId === group.groupId) await reloadSelectedGroup();
-      if (outcome.status === "success") {
-        window.setTimeout(() => {
-          setCardSync((map) => {
-            if (map[group.groupId]?.status !== "success") return map;
-            const next = { ...map };
-            delete next[group.groupId];
-            return next;
-          });
-        }, 4000);
+      for (const group of targets) {
+        try {
+          const report = await api.syncSessionGroupSafeBatch(client, group.groupId, scope, restart);
+          combined.synced.push(...report.synced);
+          combined.skipped.push(...report.skipped);
+          combined.errors.push(...report.errors);
+          combined.needsRecovery ||= Boolean(report.needsRecovery);
+          if (report.needsRecovery) break;
+        } catch (error) {
+          // 单个会话失败不阻断其余会话；错误统一汇总后提示。
+          combined.errors.push({ error: `${group.title}：${api.asError(error)}` });
+        }
       }
+      notifyResult(combined);
+      setBulkSync(summarizeQuickSync(combined));
+      // 同步完成后立即刷新列表；若详情正打开，一并刷新成员版本。
+      await reloadGroups();
+      if (contextRef.current.selectedGroupId) await reloadSelectedGroup();
     } catch (error) {
       const message = api.asError(error);
-      setCardSync((map) => ({ ...map, [group.groupId]: { status: "error", message } }));
+      setBulkSync({ status: "error", message });
       toast.error("一键同步失败", { description: message });
     } finally {
-      cardSyncKeyRef.current = null;
+      quickSyncKeyRef.current = null;
       setActionBusy(false);
     }
   }
@@ -620,7 +565,6 @@ export default function SessionsPage() {
       error={detailError} loading={detailLoading} onClose={closeDetail}
       onRetry={() => { setDetailError(null); void reloadSelectedGroup(); }}
       onPrepareUnify={prepareUnify} onConfirmUnify={confirmUnify} onBatchSync={syncSafeBatch} onAdd={addMember}
-      quickSync={quickSync} onQuickSync={() => void quickSyncGroup()}
       onUnlinkMember={unlinkMember}
       addOpen={addOpen} setAddOpen={setAddOpen} fullPage={false}
     />
@@ -642,6 +586,17 @@ export default function SessionsPage() {
               <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">统一管理各账号下的会话副本，按需复制或同步。</p>
             </div>
             <div className="flex max-w-full flex-wrap items-center justify-end gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                className="shrink-0"
+                disabled={loading || actionBusy || pendingGroups.length === 0}
+                title={bulkSync.status === "running" ? "正在同步待同步会话…" : bulkSync.message ?? (pendingGroups.length > 0 ? `同步 ${pendingGroups.length} 个待同步会话` : "当前没有待同步的会话")}
+                onClick={() => void quickSyncAll()}
+              >
+                {bulkSync.status === "running" ? <Loader2 className="animate-spin" /> : <RefreshCcw />}
+                {bulkSync.status === "running" ? "同步中…" : `一键同步${pendingGroups.length > 0 ? ` (${pendingGroups.length})` : ""}`}
+              </Button>
               <Button variant="outline" size="sm" className="shrink-0" onClick={() => void (selectedGroupId ? reloadSelectedGroup() : reloadGroups())} disabled={loading || detailLoading}><RefreshCw className={loading ? "animate-spin" : undefined} />刷新</Button>
               <AddLinkedSessionDialog client={client} disabled={loading} onDone={() => void (selectedGroupId ? reloadSelectedGroup() : reloadGroups())} requestRestartConfirm={(actionLabel, run) => setRestartPrompt({ actionLabel, run })} />
             </div>
@@ -676,7 +631,7 @@ export default function SessionsPage() {
           </div>
           {(storeStatus === "unavailable" || storeError) && <p role="status" className="mb-3 rounded-lg border border-amber-500/30 p-3 text-sm text-muted-foreground">{storeError ?? "关联组存储暂不可用，当前只展示可读取的数据。"}</p>}
           {loadError && <div role="alert" className="mb-3 rounded-lg border border-destructive/30 p-3 text-sm text-destructive">{loadError}<Button variant="outline" size="sm" className="ml-2" onClick={() => void reloadGroups()}>重试</Button></div>}
-          {loading ? <GroupSkeleton /> : filteredGroups.length === 0 ? <div className="flex min-h-56 flex-col items-center justify-center rounded-xl border border-dashed p-6 text-center"><Layers3 className="size-7 text-muted-foreground" /><h3 className="mt-3 text-sm font-medium">{groups.length === 0 ? "还没有关联会话组" : "没有符合条件的会话"}</h3><p className="mt-2 text-sm text-muted-foreground">{groups.length === 0 ? "从账号切换时复制会话后，关联组会显示在这里。" : "试试其它筛选条件。"}</p></div> : <div className={`grid min-w-0 gap-3 ${contentWidth >= 600 ? "grid-cols-2" : "grid-cols-1"}`}>{visibleGroups.map((group) => <SessionGroupCard key={group.key} group={group} selected={group.groupId === selectedGroupId} onSelect={() => openDetail(group.groupId)} onRequestDelete={() => setDeleteTarget(group)} quickSync={cardSync[group.groupId]} onQuickSync={() => quickSyncCard(group)} disabled={actionBusy} />)}</div>}
+          {loading ? <GroupSkeleton /> : filteredGroups.length === 0 ? <div className="flex min-h-56 flex-col items-center justify-center rounded-xl border border-dashed p-6 text-center"><Layers3 className="size-7 text-muted-foreground" /><h3 className="mt-3 text-sm font-medium">{groups.length === 0 ? "还没有关联会话组" : "没有符合条件的会话"}</h3><p className="mt-2 text-sm text-muted-foreground">{groups.length === 0 ? "从账号切换时复制会话后，关联组会显示在这里。" : "试试其它筛选条件。"}</p></div> : <div className={`grid min-w-0 gap-3 ${contentWidth >= 600 ? "grid-cols-2" : "grid-cols-1"}`}>{visibleGroups.map((group) => <SessionGroupCard key={group.key} group={group} selected={group.groupId === selectedGroupId} onSelect={() => openDetail(group.groupId)} onRequestDelete={() => setDeleteTarget(group)} />)}</div>}
           {!loading && filteredGroups.length > PAGINATION_HIDE_MAX && <div className="mt-6 flex flex-wrap items-center justify-between gap-3 text-xs text-muted-foreground"><span>显示 {(currentPage - 1) * PAGE_SIZE + 1}–{Math.min(currentPage * PAGE_SIZE, filteredGroups.length)}，共 {filteredGroups.length} 个会话</span><nav aria-label="会话分页" className="flex flex-wrap items-center gap-1.5"><Button variant="outline" size="icon" className="size-8" aria-label="上一页" disabled={currentPage <= 1} onClick={() => setPage(currentPage - 1)}><ChevronLeft /></Button>{pages.map((value, index) => <span key={value} className="flex items-center gap-1.5">{index > 0 && value - pages[index - 1] > 1 && <span>…</span>}<Button variant={value === currentPage ? "default" : "outline"} className={`size-8 p-0 ${value === currentPage ? "bg-brand text-brand-foreground hover:bg-brand/90" : ""}`} aria-label={`第 ${value} 页`} aria-current={value === currentPage ? "page" : undefined} onClick={() => setPage(value)}>{value}</Button></span>)}<Button variant="outline" size="icon" className="size-8" aria-label="下一页" disabled={currentPage >= pageCount} onClick={() => setPage(currentPage + 1)}><ChevronRight /></Button></nav></div>}
         </section>
       </div>
@@ -1036,47 +991,14 @@ function GroupSkeleton() {
   </div>;
 }
 
-function SessionGroupCard({ group, selected, onSelect, onRequestDelete, quickSync, onQuickSync, disabled }: {
-  group: SessionGroupSummary;
-  selected: boolean;
-  onSelect: () => void;
-  onRequestDelete: () => void;
-  quickSync?: QuickSyncState;
-  onQuickSync: () => void;
-  disabled: boolean;
-}) {
-  const running = quickSync?.status === "running";
-  const failed = quickSync?.status === "error";
-  const succeeded = quickSync?.status === "success";
-  // 只有确实存在落后副本的组才显示入口；同步中 / 失败 / 刚成功的状态额外保留，保证反馈可见。
-  const showSync = (group.summaryStatus === "behind" && group.hasSafeSource) || running || failed || succeeded;
-  const syncLabel = running ? "同步中" : failed ? "重试" : succeeded ? "已同步" : "一键同步";
+function SessionGroupCard({ group, selected, onSelect, onRequestDelete }: { group: SessionGroupSummary; selected: boolean; onSelect: () => void; onRequestDelete: () => void }) {
   // 「…」不能嵌在整卡按钮里（button 不能嵌套 button），所以绝对定位到卡片右上角。
-  return <div className={`relative min-w-0 rounded-lg border bg-card text-left transition-colors ${selected ? "border-brand shadow-sm" : "border-border hover:border-brand/50"}`}>
-    <button type="button" onClick={onSelect} aria-pressed={selected} className="block w-full min-w-0 cursor-pointer rounded-lg px-4 pb-1 pt-3.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+  return <div className="relative min-w-0">
+    <button type="button" onClick={onSelect} aria-pressed={selected} className={`w-full min-w-0 cursor-pointer rounded-lg border bg-card px-4 py-3.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${selected ? "border-brand shadow-sm" : "border-border hover:border-brand/50"}`}>
       <div className="flex min-w-0 items-center justify-between gap-2 pr-7 text-xs text-muted-foreground"><span className="flex min-w-0 items-center gap-2"><Folder className="size-4 shrink-0" /><span className="truncate" title={group.projectLabel}>{group.projectLabel || "未标记项目"}</span></span><span className="shrink-0" title={formatDate(group.latestActivityAt)}>{relativeDate(group.latestActivityAt)}</span></div>
       <h3 className="my-3 truncate text-base font-semibold" title={group.title}>{group.title}</h3>
+      <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-muted-foreground"><span className="flex items-center gap-2" title={group.accountNames.join("、")}><MessageCircle className="size-4" />{group.memberCount} 个账号</span><span className="flex min-w-0 items-center gap-2 text-xs"><span className={`size-2 shrink-0 rounded-full ${group.summaryStatus === "latest" ? "bg-brand" : group.summaryStatus === "behind" ? "bg-amber-500" : group.summaryStatus === "diverge" ? "bg-destructive" : "bg-muted-foreground"}`} /><span className="truncate" title={group.summaryText}>{{ latest: "内容一致", behind: "待同步", diverge: "有分歧", missing: "内容缺失", unknown: "无法确认" }[group.summaryStatus]}</span></span></div>
     </button>
-    <div onClick={onSelect} className="flex min-w-0 cursor-pointer flex-wrap items-center justify-between gap-x-2 gap-y-1.5 px-4 pb-3 text-sm text-muted-foreground">
-      <span className="flex items-center gap-2" title={group.accountNames.join("、")}><MessageCircle className="size-4" />{group.memberCount} 个账号</span>
-      <span className="flex min-w-0 items-center gap-2 text-xs">
-        <span className={`size-2 shrink-0 rounded-full ${group.summaryStatus === "latest" ? "bg-brand" : group.summaryStatus === "behind" ? "bg-amber-500" : group.summaryStatus === "diverge" ? "bg-destructive" : "bg-muted-foreground"}`} />
-        <span className="truncate" title={failed ? quickSync?.message ?? group.summaryText : group.summaryText}>{{ latest: "内容一致", behind: "待同步", diverge: "有分歧", missing: "内容缺失", unknown: "无法确认" }[group.summaryStatus]}</span>
-        {showSync && <Button
-          variant="outline"
-          size="sm"
-          className={`h-6 shrink-0 gap-1 px-2 text-[11px] ${failed ? "border-destructive/40 text-destructive" : ""}`}
-          data-card-action
-          disabled={disabled || running}
-          title={failed ? quickSync?.message ?? "同步失败，可重试" : "同步当前关联会话的落后副本"}
-          aria-label={`一键同步「${group.title}」`}
-          onClick={(event) => { event.stopPropagation(); onQuickSync(); }}
-        >
-          {running ? <Loader2 className="size-3 animate-spin" /> : failed ? <TriangleAlert className="size-3" /> : succeeded ? <Check className="size-3" /> : <RefreshCw className="size-3" />}
-          {syncLabel}
-        </Button>}
-      </span>
-    </div>
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button variant="ghost" size="icon" className="absolute right-2 top-2.5 size-6 text-muted-foreground hover:text-foreground" aria-label={`${group.title} 的操作`} title="更多操作"><Ellipsis className="size-3.5" /></Button>

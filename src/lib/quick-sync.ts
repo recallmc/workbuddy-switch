@@ -1,39 +1,4 @@
-import type { SessionGroupDetail } from "@/lib/types";
-
-/** 一键同步的界面状态：进行中 / 成功 / 失败都直接驱动详情面板的提示条。 */
-export type QuickSyncStatus = "idle" | "running" | "success" | "error";
-
-export interface QuickSyncState {
-  status: QuickSyncStatus;
-  message?: string;
-}
-
-export type QuickSyncPrecheck =
-  | { kind: "ready"; targetAccountIds: string[] }
-  | { kind: "latest" | "blocked"; message: string };
-
-/**
- * 点击「一键同步」前的本地判定：不发请求就能拦掉无数据 / 无需同步的场景，
- * 避免把空转也显示成失败。真正的安全校验仍由后端批量同步接口复核。
- */
-export function precheckQuickSync(
-  detail: Pick<SessionGroupDetail, "members" | "safeSourceMemberId"> | null,
-): QuickSyncPrecheck {
-  if (!detail) return { kind: "blocked", message: "会话详情尚未加载完成，请稍后重试" };
-  const active = detail.members.filter((member) => member.linkState === "active");
-  if (active.length === 0) return { kind: "blocked", message: "关联组暂无可同步的有效会话" };
-  if (!detail.safeSourceMemberId) return { kind: "blocked", message: "当前没有可安全读取的来源副本" };
-  const behind = active.filter((member) => member.versionStatus === "behind");
-  if (behind.length === 0) return { kind: "latest", message: "已是最新，无需同步" };
-  return {
-    kind: "ready",
-    targetAccountIds: behind
-      .map((member) => member.accountId)
-      .filter((id): id is string => Boolean(id)),
-  };
-}
-
-/** 把批量同步报告收敛成一句带状态的提示，供详情面板内联展示。 */
+/** 把批量同步报告收敛成一句带状态的提示，供按钮 title 与 toast 复用。 */
 export function summarizeQuickSync(
   report: {
     synced?: readonly unknown[];

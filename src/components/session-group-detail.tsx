@@ -13,7 +13,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { displayName } from "@/lib/account-display";
 import { accountVariant, variantIsIntl, variantLabel } from "@/lib/variant";
-import type { QuickSyncState } from "@/lib/quick-sync";
 import type { SessionGroupClient, SessionGroupCurrentAccount, SessionGroupDetail, SessionGroupMemberDetail, SessionGroupUnifyPlan } from "@/lib/types";
 import "./session-group-detail.css";
 
@@ -36,9 +35,6 @@ export interface GroupDetailPanelProps {
   onPrepareUnify: (member: SessionGroupMemberDetail) => void;
   onConfirmUnify: () => Promise<void>;
   onBatchSync: () => void;
-  /** 一键同步当前关联会话：同步进行中 / 结果都回显在面板顶部。 */
-  quickSync: QuickSyncState;
-  onQuickSync: () => void;
   onAdd: () => Promise<void>;
   onUnlinkMember: (member: SessionGroupMemberDetail) => Promise<void>;
   addOpen: boolean;
@@ -193,40 +189,12 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
   }
 
   return <section aria-label="会话组详情" className="session-relationship flex h-full min-h-0 min-w-0 flex-col bg-card">
-    <div className="flex shrink-0 items-center justify-between gap-2 px-4 py-2.5">
+    <div className="flex shrink-0 items-center justify-between px-4 py-2.5">
       <span className="text-xs font-medium text-muted-foreground">会话详情</span>
-      <div className="flex min-w-0 items-center gap-1.5">
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-7 shrink-0 gap-1.5 text-xs"
-          data-quick-sync
-          title="同步当前关联会话中所有落后的副本"
-          aria-label="一键同步当前关联会话"
-          disabled={!detail || props.busy || props.quickSync.status === "running"}
-          onClick={props.onQuickSync}
-        >
-          <RefreshCw className={`size-3.5 ${props.quickSync.status === "running" ? "animate-spin" : ""}`} aria-hidden="true" />
-          {props.quickSync.status === "running" ? "同步中…" : "一键同步"}
-        </Button>
-        <Button variant="ghost" size={props.fullPage ? "sm" : "icon"} className={props.fullPage ? "h-7 text-xs" : "size-7"} aria-label={props.fullPage ? "返回会话" : "关闭详情"} onClick={props.onClose}>
-          {props.fullPage ? <><ChevronLeft className="size-3.5" />返回会话</> : <X className="size-4" />}
-        </Button>
-      </div>
+      <Button variant="ghost" size={props.fullPage ? "sm" : "icon"} className={props.fullPage ? "h-7 text-xs" : "size-7"} aria-label={props.fullPage ? "返回会话" : "关闭详情"} onClick={props.onClose}>
+        {props.fullPage ? <><ChevronLeft className="size-3.5" />返回会话</> : <X className="size-4" />}
+      </Button>
     </div>
-    {props.quickSync.status !== "idle" && <p
-      role="status"
-      aria-live="polite"
-      data-quick-sync-status={props.quickSync.status}
-      className={`mx-4 mb-2 flex items-start gap-1.5 rounded-md border px-2 py-1.5 text-[11px] leading-4 ${props.quickSync.status === "error" ? "border-destructive/30 bg-destructive/10 text-destructive" : props.quickSync.status === "success" ? "border-brand/30 bg-brand/10 text-brand" : "border-border bg-muted/60 text-muted-foreground"}`}
-    >
-      {props.quickSync.status === "running"
-        ? <Loader2 className="mt-0.5 size-3 shrink-0 animate-spin" aria-hidden="true" />
-        : props.quickSync.status === "success"
-          ? <Check className="mt-0.5 size-3 shrink-0" aria-hidden="true" />
-          : <TriangleAlert className="mt-0.5 size-3 shrink-0" aria-hidden="true" />}
-      <span className="min-w-0 break-words">{props.quickSync.message}</span>
-    </p>}
     <div data-detail-scroll className="min-h-0 flex-1 overflow-y-auto px-4 pb-3">
       {props.error && <div role="alert" className="mb-3 space-y-1.5 rounded-lg border border-destructive/30 p-2.5 text-xs text-destructive">
         <p className="break-words">{props.error}</p><Button variant="outline" size="sm" className="h-7 text-xs" disabled={props.loading} onClick={props.onRetry}>重试</Button>
