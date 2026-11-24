@@ -15,3 +15,8 @@ resolver = "2"
 # 则不需要它，可以整段删除并移除 `vendor-patched/`。
 [patch.crates-io]
 indexmap = { path = "vendor-patched/indexmap" }
+# auto-launch 0.5.0 写 Windows 自启动项时不给可执行文件路径加引号
+# （format!("{} {}", path, args)）。安装路径含空格（如 D://Program Files\...）时，
+# 登录后 Windows 会把 "D://Program" 当成可执行文件，自启动静默失败。
+# 这里 vendor 一份并只修这一处：路径加引号，参数照旧。
+auto-launch = { path = "vendor-patched/auto-launch" }
